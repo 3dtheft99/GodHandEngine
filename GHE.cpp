@@ -1,190 +1,352 @@
 #define WIN32_LEAN_AND_MEAN
 #define STRICT
+
 #include <windows.h>
 #include <tlhelp32.h>
-#include <vector>
-#include <string>
+
 #include <fstream>
-#include <sstream>
 #include <iomanip>
 
 static bool g_IsFirstLogCall = true;
 
-void LogEventSilently(const char* message) noexcept {
-    try {
+void LogEventSilently(const char* message) noexcept
+{
+    try
+    {
         std::ofstream logFile;
-        if (g_IsFirstLogCall) {
-            logFile.open("monitor_log.txt", std::ios::out | std::ios::trunc);
+
+        if (g_IsFirstLogCall)
+        {
+            logFile.open(
+                "monitor_log.txt",
+                std::ios::out | std::ios::trunc
+            );
+
             g_IsFirstLogCall = false;
         }
-        else {
-            logFile.open("monitor_log.txt", std::ios::out | std::ios::app);
+        else
+        {
+            logFile.open(
+                "monitor_log.txt",
+                std::ios::out | std::ios::app
+            );
         }
 
-        if (logFile.is_open()) {
+        if (logFile.is_open())
+        {
             SYSTEMTIME st;
+
             ::GetLocalTime(&st);
-            logFile << "[" << std::setw(4) << std::setfill('0') << st.wYear << "-"
-                << std::setw(2) << std::setfill('0') << st.wMonth << "-"
-                << std::setw(2) << std::setfill('0') << st.wDay << " "
-                << std::setw(2) << std::setfill('0') << st.wHour << ":"
-                << std::setw(2) << std::setfill('0') << st.wMinute << ":"
-                << std::setw(2) << std::setfill('0') << st.wSecond << "] "
-                << message << "\n";
+
+            logFile
+                << "["
+                << std::setw(4) << std::setfill('0') << st.wYear
+                << "-"
+                << std::setw(2) << std::setfill('0') << st.wMonth
+                << "-"
+                << std::setw(2) << std::setfill('0') << st.wDay
+                << " "
+                << std::setw(2) << std::setfill('0') << st.wHour
+                << ":"
+                << std::setw(2) << std::setfill('0') << st.wMinute
+                << ":"
+                << std::setw(2) << std::setfill('0') << st.wSecond
+                << "] "
+                << message
+                << "\n";
         }
     }
-    catch (...) {}
+    catch (...)
+    {
+    }
 }
 
-class CriticalResourceGuard {
+class CriticalResourceGuard
+{
 private:
-    HANDLE m_handle;
+
+    HANDLE m_Handle;
+
 public:
-    explicit CriticalResourceGuard(HANDLE h) noexcept : m_handle(h) {}
-    ~CriticalResourceGuard() noexcept {
-        if (m_handle && m_handle != INVALID_HANDLE_VALUE) {
-            ::CloseHandle(m_handle);
+
+    explicit CriticalResourceGuard(
+        HANDLE handle) noexcept
+        :
+        m_Handle(handle)
+    {
+    }
+
+    ~CriticalResourceGuard() noexcept
+    {
+        if (
+            m_Handle &&
+            m_Handle != INVALID_HANDLE_VALUE)
+        {
+            ::CloseHandle(m_Handle);
         }
     }
-    [[nodiscard]] HANDLE Get() const noexcept { return m_handle; }
-    [[nodiscard]] bool IsValid() const noexcept { return m_handle && m_handle != INVALID_HANDLE_VALUE; }
-    CriticalResourceGuard(const CriticalResourceGuard&) = delete;
-    CriticalResourceGuard& operator=(const CriticalResourceGuard&) = delete;
+
+    HANDLE Get() const noexcept
+    {
+        return m_Handle;
+    }
+
+    bool IsValid() const noexcept
+    {
+        return (
+            m_Handle &&
+            m_Handle != INVALID_HANDLE_VALUE
+            );
+    }
+
+    CriticalResourceGuard(
+        const CriticalResourceGuard&) = delete;
+
+    CriticalResourceGuard& operator=(
+        const CriticalResourceGuard&) = delete;
 };
 
-bool IsSystemElevatedSecure() noexcept {
-    BOOL bIsElevated = FALSE;
-    HANDLE hToken = nullptr;
-    if (::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
-        CriticalResourceGuard tokenGuard(hToken);
+bool IsSystemElevatedSecure() noexcept
+{
+    BOOL elevated = FALSE;
+
+    HANDLE token = nullptr;
+
+    if (::OpenProcessToken(
+        ::GetCurrentProcess(),
+        TOKEN_QUERY,
+        &token))
+    {
+        CriticalResourceGuard guard(token);
+
         TOKEN_ELEVATION elevation;
-        DWORD dwSize = sizeof(elevation);
-        if (::GetTokenInformation(tokenGuard.Get(), TokenElevation, &elevation, sizeof(elevation), &dwSize)) {
-            bIsElevated = elevation.TokenIsElevated;
+
+        DWORD size =
+            sizeof(elevation);
+
+        if (::GetTokenInformation(
+            guard.Get(),
+            TokenElevation,
+            &elevation,
+            sizeof(elevation),
+            &size))
+        {
+            elevated =
+                elevation.TokenIsElevated;
         }
     }
-    return bIsElevated != 0;
+
+    return elevated != FALSE;
 }
 
-[[nodiscard]] DWORD ScanActiveProcessesPerpetual(const wchar_t* targetName) noexcept {
-    DWORD foundPid = 0;
-    HANDLE snapshotRaw = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snapshotRaw == INVALID_HANDLE_VALUE) return 0;
+DWORD ScanActiveProcessesPerpetual(
+    const wchar_t* targetName) noexcept
+{
+    HANDLE snapshot =
+        ::CreateToolhelp32Snapshot(
+            TH32CS_SNAPPROCESS,
+            0
+        );
 
-    CriticalResourceGuard snapshotGuard(snapshotRaw);
-    PROCESSENTRY32W processEntry;
-    processEntry.dwSize = sizeof(processEntry);
+    if (snapshot == INVALID_HANDLE_VALUE)
+        return 0;
 
-    if (::Process32FirstW(snapshotGuard.Get(), &processEntry)) {
-        do {
-            if (_wcsicmp(processEntry.szExeFile, targetName) == 0) {
-                if (processEntry.th32ProcessID != 0 && processEntry.cntThreads > 0) {
-                    foundPid = processEntry.th32ProcessID;
-                    break;
-                }
+    CriticalResourceGuard guard(snapshot);
+
+    PROCESSENTRY32W entry;
+
+    entry.dwSize =
+        sizeof(entry);
+
+    if (!::Process32FirstW(
+        guard.Get(),
+        &entry))
+    {
+        return 0;
+    }
+
+    do
+    {
+        if (_wcsicmp(
+            entry.szExeFile,
+            targetName) == 0)
+        {
+            if (
+                entry.th32ProcessID &&
+                entry.cntThreads)
+            {
+                return entry.th32ProcessID;
             }
-        } while (::Process32NextW(snapshotGuard.Get(), &processEntry));
-    }
-    return foundPid;
-}
-
-void ApplyMemorySafetyShield(DWORD processId) noexcept {
-    HANDLE processRaw = ::OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION, FALSE, processId);
-    if (!processRaw) return;
-    CriticalResourceGuard processGuard(processRaw);
-
-    HANDLE tokenRaw = nullptr;
-    if (::OpenProcessToken(processGuard.Get(), TOKEN_WRITE, &tokenRaw)) {
-        CriticalResourceGuard tokenGuard(tokenRaw);
-        DWORD virtualizationFlags = 0;
-        ::SetTokenInformation(tokenGuard.Get(), TokenVirtualizationAllowed, &virtualizationFlags, sizeof(virtualizationFlags));
-    }
-
-    LogEventSilently("[SUCCESS] Virtualization shield deployed.");
-}
-
-static bool InternalExecutePriorityAssignment(HANDLE processHandle, DWORD targetPriority) noexcept {
-    __try {
-        DWORD exitCode = 0;
-        if (!::GetExitCodeProcess(processHandle, &exitCode) || exitCode != STILL_ACTIVE) {
-            return false;
         }
 
-        if (!::SetPriorityClass(processHandle, targetPriority)) {
-            return false;
-        }
+    } while (::Process32NextW(
+        guard.Get(),
+        &entry));
 
-        return true;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
+    return 0;
+}
+
+bool ApplyCoexistentOptimization(
+    DWORD processId,
+    DWORD priority) noexcept
+{
+    HANDLE process =
+        ::OpenProcess(
+            PROCESS_SET_INFORMATION |
+            PROCESS_QUERY_LIMITED_INFORMATION,
+            FALSE,
+            processId
+        );
+
+    if (!process)
+        return false;
+
+    CriticalResourceGuard guard(process);
+
+    DWORD exitCode = 0;
+
+    if (
+        !::GetExitCodeProcess(
+            guard.Get(),
+            &exitCode) ||
+        exitCode != STILL_ACTIVE)
+    {
         return false;
     }
+
+    if (!::SetPriorityClass(
+        guard.Get(),
+        priority))
+    {
+        return false;
+    }
+
+    ::SetProcessPriorityBoost(
+        guard.Get(),
+        FALSE
+    );
+
+    return true;
 }
 
-bool ApplyCoexistentOptimization(DWORD processId, DWORD targetPriority) noexcept {
-    HANDLE processRaw = ::OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
-    if (!processRaw) return false;
+void InternalProtectedExecutionLoopRaw(
+    bool& isObseOptimized,
+    DWORD& lastActivePid) noexcept
+{
+    __try
+    {
+        DWORD oblivionPid =
+            ScanActiveProcessesPerpetual(
+                L"Oblivion.exe"
+            );
 
-    CriticalResourceGuard processGuard(processRaw);
-    return InternalExecutePriorityAssignment(processGuard.Get(), targetPriority);
-}
-
-static void InternalProtectedExecutionLoopRaw(bool& isObseOptimized, DWORD& lastActivePid) noexcept {
-    __try {
-        DWORD pidOblivion = ScanActiveProcessesPerpetual(L"Oblivion.exe");
-
-        if (pidOblivion == 0) {
-            if (lastActivePid != 0) {
-                LogEventSilently("[INFO] Oblivion.exe terminated. Standby mode active.");
+        if (!oblivionPid)
+        {
+            if (lastActivePid)
+            {
+                LogEventSilently(
+                    "[INFO] Oblivion.exe terminated."
+                );
             }
-            isObseOptimized = false;
-            lastActivePid = 0;
 
-            DWORD pidObse = ScanActiveProcessesPerpetual(L"obse_loader.exe");
-            if (pidObse != 0 && !isObseOptimized) {
-                if (ApplyCoexistentOptimization(pidObse, ABOVE_NORMAL_PRIORITY_CLASS)) {
-                    ApplyMemorySafetyShield(pidObse);
-                    LogEventSilently("[SUCCESS] Boot priority coupled to obse_loader.exe.");
+            lastActivePid = 0;
+            isObseOptimized = false;
+
+            DWORD obsePid =
+                ScanActiveProcessesPerpetual(
+                    L"obse_loader.exe"
+                );
+
+            if (
+                obsePid &&
+                !isObseOptimized)
+            {
+                if (ApplyCoexistentOptimization(
+                    obsePid,
+                    ABOVE_NORMAL_PRIORITY_CLASS))
+                {
+                    LogEventSilently(
+                        "[SUCCESS] obse_loader.exe optimized."
+                    );
+
                     isObseOptimized = true;
                 }
             }
-            ::Sleep(2000);
-        }
-        else {
-            if (pidOblivion != lastActivePid) {
-                LogEventSilently("[INFO] Oblivion.exe detected. Tracking active.");
-                lastActivePid = pidOblivion;
 
-                ::Sleep(12000);
-                ApplyCoexistentOptimization(pidOblivion, ABOVE_NORMAL_PRIORITY_CLASS);
-                ApplyMemorySafetyShield(pidOblivion);
+            ::Sleep(4000);
+        }
+        else
+        {
+            if (oblivionPid != lastActivePid)
+            {
+                lastActivePid =
+                    oblivionPid;
+
+                LogEventSilently(
+                    "[INFO] Oblivion.exe detected."
+                );
+
+                ::Sleep(8000);
+
+                ApplyCoexistentOptimization(
+                    oblivionPid,
+                    ABOVE_NORMAL_PRIORITY_CLASS
+                );
+
+                LogEventSilently(
+                    "[SUCCESS] Oblivion.exe optimized."
+                );
             }
-            else {
-                ::Sleep(10000);
+            else
+            {
+                ::Sleep(15000);
             }
         }
     }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        LogEventSilently("[ERROR] Loop exception intercepted. Recovery engaged.");
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        LogEventSilently(
+            "[ERROR] Runtime exception intercepted."
+        );
+
         ::Sleep(5000);
     }
 }
 
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCmdShow) {
-    ::SetPriorityClass(::GetCurrentProcess(), IDLE_PRIORITY_CLASS);
+int WINAPI wWinMain(
+    HINSTANCE,
+    HINSTANCE,
+    LPWSTR,
+    int)
+{
+    ::SetPriorityClass(
+        ::GetCurrentProcess(),
+        IDLE_PRIORITY_CLASS
+    );
 
-    LogEventSilently("[INIT] External optimization shield active.");
+    LogEventSilently(
+        "[INIT] External optimization runtime active."
+    );
 
-    if (!IsSystemElevatedSecure()) {
-        LogEventSilently("[CRITICAL_ERROR] Administrative privileges required. Terminating.");
+    if (!IsSystemElevatedSecure())
+    {
+        LogEventSilently(
+            "[CRITICAL_ERROR] Administrator privileges required."
+        );
+
         return 0;
     }
 
     bool isObseOptimized = false;
+
     DWORD lastActivePid = 0;
 
-    while (true) {
-        InternalProtectedExecutionLoopRaw(isObseOptimized, lastActivePid);
+    while (true)
+    {
+        InternalProtectedExecutionLoopRaw(
+            isObseOptimized,
+            lastActivePid
+        );
     }
 
     return 0;
