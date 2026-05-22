@@ -19,6 +19,9 @@
 #include <cstring>
 #include <vector>
 #include <atomic>
+#include <deque>
+#include <string>
+#include <mutex>
 
 #pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "psapi.lib")
@@ -76,6 +79,9 @@ const char* const MASTER_LOG_PATH =
 
 constexpr DWORD kMaintenanceIntervalMS =
 120000;
+
+constexpr size_t kMaxLogLines =
+500;
 
 enum RuntimeMode
 {
@@ -143,6 +149,40 @@ true;
 static bool gEnableDiagnostics =
 true;
 
+static std::deque<std::string> gLogBuffer;
+
+static std::mutex gLogMutex;
+
+void FlushCircularLog()
+{
+    if (gLogFile == INVALID_HANDLE_VALUE)
+        return;
+
+    SetFilePointer(
+        gLogFile,
+        0,
+        nullptr,
+        FILE_BEGIN
+    );
+
+    SetEndOfFile(gLogFile);
+
+    DWORD written = 0;
+
+    for (const auto& line : gLogBuffer)
+    {
+        WriteFile(
+            gLogFile,
+            line.c_str(),
+            (DWORD)line.size(),
+            &written,
+            nullptr
+        );
+    }
+
+    FlushFileBuffers(gLogFile);
+}
+
 void Log(
     const char* fmt,
     ...)
@@ -181,17 +221,22 @@ void Log(
         message
     );
 
-    DWORD written = 0;
-
-    WriteFile(
-        gLogFile,
-        finalBuffer,
-        (DWORD)strlen(finalBuffer),
-        &written,
-        nullptr
+    std::lock_guard<std::mutex> lock(
+        gLogMutex
     );
 
-    FlushFileBuffers(gLogFile);
+    gLogBuffer.push_back(
+        finalBuffer
+    );
+
+    while (
+        gLogBuffer.size() >
+        kMaxLogLines)
+    {
+        gLogBuffer.pop_front();
+    }
+
+    FlushCircularLog();
 }
 
 void OpenLog()
