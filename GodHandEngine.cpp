@@ -12,6 +12,7 @@
 #include <windows.h>
 #include <mmsystem.h>
 #include <psapi.h>
+#include <process.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -78,7 +79,10 @@ const char* const MASTER_LOG_PATH =
 "Data\\OBSE\\Plugins\\Z_GodHandEngine.log";
 
 constexpr DWORD kMaintenanceIntervalMS =
-120000;
+300000;
+
+constexpr DWORD kLogFlushIntervalMS =
+3000;
 
 constexpr size_t kMaxLogLines =
 500;
@@ -97,7 +101,9 @@ struct RuntimeCapabilities
     bool hasEngineBugFixes = false;
     bool hasBlueEngineFixes = false;
     bool hasDisplayTweaks = false;
+
     bool hasDXVK = false;
+    bool hasModernD3DHooking = false;
 
     bool hasMoreHeap = false;
     bool hasHeapManager = false;
@@ -105,7 +111,6 @@ struct RuntimeCapabilities
     bool hasModernFramePacing = false;
     bool hasModernCrashFixes = false;
     bool hasModernHeapManagement = false;
-    bool hasModernD3DHooking = false;
 };
 
 static RuntimeCapabilities gCaps;
@@ -119,7 +124,13 @@ INVALID_HANDLE_VALUE;
 static HANDLE gWorkerThread =
 nullptr;
 
+static HANDLE gLoggerThread =
+nullptr;
+
 static HANDLE gStopEvent =
+nullptr;
+
+static HANDLE gLogEvent =
 nullptr;
 
 static std::atomic_bool gRunning =
@@ -131,16 +142,7 @@ true;
 static bool gEnableTimerResolution =
 false;
 
-static bool gEnablePriorityBoost =
-false;
-
-static bool gEnableIdealProcessor =
-false;
-
 static bool gEnablePowerThrottlingPatch =
-true;
-
-static bool gEnableExceptionFilter =
 true;
 
 static bool gEnableTelemetry =
@@ -153,34 +155,56 @@ static std::deque<std::string> gLogBuffer;
 
 static std::mutex gLogMutex;
 
-void FlushCircularLog()
+bool IsModuleLoaded(
+    const char* moduleName)
 {
-    if (gLogFile == INVALID_HANDLE_VALUE)
-        return;
+    return (
+        GetModuleHandleA(moduleName)
+        != nullptr
+        );
+}
 
-    SetFilePointer(
-        gLogFile,
-        0,
+void OpenLog()
+{
+    gLogFile = CreateFileA(
+        MASTER_LOG_PATH,
+        GENERIC_WRITE,
+        FILE_SHARE_READ,
         nullptr,
-        FILE_BEGIN
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr
+    );
+}
+
+void CloseLog()
+{
+    if (gLogFile != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(gLogFile);
+
+        gLogFile =
+            INVALID_HANDLE_VALUE;
+    }
+}
+
+void PushLogLine(
+    const char* text)
+{
+    std::lock_guard<std::mutex> lock(
+        gLogMutex
     );
 
-    SetEndOfFile(gLogFile);
+    gLogBuffer.push_back(text);
 
-    DWORD written = 0;
-
-    for (const auto& line : gLogBuffer)
+    while (
+        gLogBuffer.size() >
+        kMaxLogLines)
     {
-        WriteFile(
-            gLogFile,
-            line.c_str(),
-            (DWORD)line.size(),
-            &written,
-            nullptr
-        );
+        gLogBuffer.pop_front();
     }
 
-    FlushFileBuffers(gLogFile);
+    SetEvent(gLogEvent);
 }
 
 void Log(
@@ -221,55 +245,154 @@ void Log(
         message
     );
 
-    std::lock_guard<std::mutex> lock(
-        gLogMutex
-    );
+    PushLogLine(finalBuffer);
+}
 
-    gLogBuffer.push_back(
-        finalBuffer
-    );
-
-    while (
-        gLogBuffer.size() >
-        kMaxLogLines)
+unsigned __stdcall LoggerThread(
+    void*)
+{
+    HANDLE handles[2]
     {
-        gLogBuffer.pop_front();
-    }
+        gStopEvent,
+        gLogEvent
+    };
 
-    FlushCircularLog();
-}
-
-void OpenLog()
-{
-    gLogFile = CreateFileA(
-        MASTER_LOG_PATH,
-        GENERIC_WRITE,
-        FILE_SHARE_READ,
-        nullptr,
-        CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL,
-        nullptr
-    );
-}
-
-void CloseLog()
-{
-    if (gLogFile != INVALID_HANDLE_VALUE)
+    while (gRunning)
     {
-        CloseHandle(gLogFile);
+        DWORD result =
+            WaitForMultipleObjects(
+                2,
+                handles,
+                FALSE,
+                kLogFlushIntervalMS
+            );
 
-        gLogFile =
-            INVALID_HANDLE_VALUE;
-    }
-}
+        if (result == WAIT_OBJECT_0)
+            break;
 
-bool IsModuleLoaded(
-    const char* moduleName)
-{
-    return (
-        GetModuleHandleA(moduleName)
-        != nullptr
+        std::deque<std::string> localCopy;
+
+        {
+            std::lock_guard<std::mutex> lock(
+                gLogMutex
+            );
+
+            localCopy = gLogBuffer;
+
+            ResetEvent(gLogEvent);
+        }
+
+        SetFilePointer(
+            gLogFile,
+            0,
+            nullptr,
+            FILE_BEGIN
         );
+
+        SetEndOfFile(gLogFile);
+
+        for (const auto& line : localCopy)
+        {
+            DWORD written = 0;
+
+            WriteFile(
+                gLogFile,
+                line.c_str(),
+                (DWORD)line.size(),
+                &written,
+                nullptr
+            );
+        }
+
+        FlushFileBuffers(gLogFile);
+    }
+
+    return 0;
+}
+
+void StartLogger()
+{
+    gLogEvent =
+        CreateEventA(
+            nullptr,
+            TRUE,
+            FALSE,
+            nullptr
+        );
+
+    gLoggerThread =
+        (HANDLE)_beginthreadex(
+            nullptr,
+            0,
+            LoggerThread,
+            nullptr,
+            0,
+            nullptr
+        );
+}
+
+void StopLogger()
+{
+    if (gLogEvent)
+    {
+        SetEvent(gLogEvent);
+    }
+
+    if (gLoggerThread)
+    {
+        WaitForSingleObject(
+            gLoggerThread,
+            3000
+        );
+
+        CloseHandle(
+            gLoggerThread
+        );
+
+        gLoggerThread =
+            nullptr;
+    }
+
+    if (gLogEvent)
+    {
+        CloseHandle(
+            gLogEvent
+        );
+
+        gLogEvent =
+            nullptr;
+    }
+}
+
+void RefreshGraphicsHooks()
+{
+    bool currentD3D9 =
+        IsModuleLoaded("d3d9.dll");
+
+    bool currentDXGI =
+        IsModuleLoaded("dxgi.dll");
+
+    if (
+        currentD3D9 &&
+        !gCaps.hasModernD3DHooking)
+    {
+        gCaps.hasModernD3DHooking = true;
+
+        Log(
+            "[GRAPHICS] D3D9_WRAPPER_DETECTED"
+        );
+    }
+
+    if (
+        currentDXGI &&
+        !gCaps.hasDXVK)
+    {
+        gCaps.hasDXVK = true;
+
+        Log(
+            "[GRAPHICS] DXVK_DETECTED"
+        );
+    }
 }
 
 void DetectPluginStack(
@@ -314,6 +437,12 @@ void DetectPluginStack(
             IsModuleLoaded("d3d11.dll")
             );
 
+    gCaps.hasModernD3DHooking =
+        (
+            IsModuleLoaded("d3d9.dll") ||
+            gCaps.hasDisplayTweaks
+            );
+
     gCaps.hasModernCrashFixes =
         (
             gCaps.hasAveSithis ||
@@ -332,11 +461,6 @@ void DetectPluginStack(
             gCaps.hasMoreHeap
             );
 
-    gCaps.hasModernD3DHooking =
-        (
-            gCaps.hasDisplayTweaks
-            );
-
     gCaps.hasHeapManager =
         (
             gCaps.hasMoreHeap ||
@@ -344,12 +468,10 @@ void DetectPluginStack(
             );
 
     Log(
-        "[STACK] AveSithis=%d EngineBugFixes=%d BA_EngineFixes=%d DisplayTweaks=%d MoreHeap=%d",
-        gCaps.hasAveSithis,
-        gCaps.hasEngineBugFixes,
-        gCaps.hasBlueEngineFixes,
-        gCaps.hasDisplayTweaks,
-        gCaps.hasMoreHeap
+        "[STACK] DXVK=%d D3DHOOK=%d DISPLAY=%d",
+        gCaps.hasDXVK,
+        gCaps.hasModernD3DHooking,
+        gCaps.hasDisplayTweaks
     );
 }
 
@@ -386,10 +508,7 @@ void ApplyAdaptivePolicies()
     {
         gEnableLFH = true;
         gEnableTimerResolution = true;
-        gEnablePriorityBoost = false;
-        gEnableIdealProcessor = false;
         gEnablePowerThrottlingPatch = true;
-        gEnableExceptionFilter = true;
 
         Log(
             "[MODE] LEGACY_STANDALONE"
@@ -402,10 +521,7 @@ void ApplyAdaptivePolicies()
     {
         gEnableLFH = true;
         gEnableTimerResolution = false;
-        gEnablePriorityBoost = false;
-        gEnableIdealProcessor = false;
         gEnablePowerThrottlingPatch = true;
-        gEnableExceptionFilter = false;
 
         Log(
             "[MODE] ENGINE_FIX_COOPERATIVE"
@@ -418,10 +534,7 @@ void ApplyAdaptivePolicies()
     {
         gEnableLFH = true;
         gEnableTimerResolution = false;
-        gEnablePriorityBoost = false;
-        gEnableIdealProcessor = false;
         gEnablePowerThrottlingPatch = true;
-        gEnableExceptionFilter = true;
 
         Log(
             "[MODE] DISPLAY_COOPERATIVE"
@@ -434,10 +547,7 @@ void ApplyAdaptivePolicies()
     {
         gEnableLFH = false;
         gEnableTimerResolution = false;
-        gEnablePriorityBoost = false;
-        gEnableIdealProcessor = false;
         gEnablePowerThrottlingPatch = false;
-        gEnableExceptionFilter = false;
 
         Log(
             "[MODE] FULL_MODERN_STACK"
@@ -452,7 +562,7 @@ void ApplyAdaptivePolicies()
         gEnableLFH = false;
 
         Log(
-            "[COMPAT] External heap manager detected - LFH disabled"
+            "[COMPAT] EXTERNAL_HEAP_MANAGER"
         );
     }
 }
@@ -462,7 +572,7 @@ void EnableLFH()
     if (!gEnableLFH)
     {
         Log(
-            "[LFH] DISABLED_BY_POLICY"
+            "[LFH] DISABLED"
         );
 
         return;
@@ -507,18 +617,12 @@ void EnableLFH()
 void ApplyTimerResolution()
 {
     if (!gEnableTimerResolution)
-    {
-        Log(
-            "[TIMER] DISABLED_BY_POLICY"
-        );
-
         return;
-    }
 
     timeBeginPeriod(1);
 
     Log(
-        "[TIMER] 1MS_ENABLED"
+        "[TIMER] 1MS"
     );
 }
 
@@ -531,66 +635,6 @@ void RestoreTimerResolution()
 
     Log(
         "[TIMER] RESTORED"
-    );
-}
-
-typedef BOOL(WINAPI* SetProcessInformationFn)(
-    HANDLE,
-    PROCESS_INFORMATION_CLASS,
-    LPVOID,
-    DWORD
-    );
-
-void DisablePowerThrottling()
-{
-    if (!gEnablePowerThrottlingPatch)
-    {
-        Log(
-            "[POWER] POLICY_DISABLED"
-        );
-
-        return;
-    }
-
-    auto kernel =
-        GetModuleHandleA(
-            "kernel32.dll"
-        );
-
-    if (!kernel)
-        return;
-
-    auto setProcessInformation =
-        reinterpret_cast<
-        SetProcessInformationFn>(
-            GetProcAddress(
-                kernel,
-                "SetProcessInformation"
-            )
-            );
-
-    if (!setProcessInformation)
-        return;
-
-    PROCESS_POWER_THROTTLING_STATE state{};
-
-    state.Version =
-        PROCESS_POWER_THROTTLING_CURRENT_VERSION;
-
-    state.ControlMask =
-        PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
-
-    state.StateMask = 0;
-
-    setProcessInformation(
-        GetCurrentProcess(),
-        ProcessPowerThrottling,
-        &state,
-        sizeof(state)
-    );
-
-    Log(
-        "[POWER] THROTTLING_DISABLED"
     );
 }
 
@@ -619,53 +663,6 @@ void LogMemoryStatus()
         workingSetMB,
         privateMB
     );
-
-    if (privateMB > 1700)
-    {
-        Log(
-            "[WARNING] HIGH_MEMORY_PRESSURE"
-        );
-    }
-}
-
-void RunDiagnostics()
-{
-    if (!gEnableDiagnostics)
-        return;
-
-    if (
-        gCaps.hasHeapManager)
-    {
-        Log(
-            "[DIAGNOSTIC] External heap manager active"
-        );
-    }
-
-    if (
-        gCaps.hasModernFramePacing &&
-        gEnableTimerResolution)
-    {
-        Log(
-            "[DIAGNOSTIC_WARNING] Legacy timer active with modern frame pacing"
-        );
-    }
-
-    if (
-        gCaps.hasModernCrashFixes &&
-        gEnableExceptionFilter)
-    {
-        Log(
-            "[DIAGNOSTIC_WARNING] Exception filter active with engine fixes"
-        );
-    }
-
-    if (
-        gCaps.hasModernD3DHooking)
-    {
-        Log(
-            "[DIAGNOSTIC] Modern D3D hook layer active"
-        );
-    }
 }
 
 void CollectTelemetry()
@@ -678,51 +675,13 @@ void CollectTelemetry()
     GetSystemInfo(&si);
 
     Log(
-        "[TELEMETRY] CPU_CORES=%u",
+        "[CPU] CORES=%u",
         si.dwNumberOfProcessors
     );
-
-    MEMORYSTATUSEX mem{};
-
-    mem.dwLength =
-        sizeof(mem);
-
-    if (
-        GlobalMemoryStatusEx(
-            &mem))
-    {
-        DWORDLONG totalMB =
-            mem.ullTotalPhys /
-            (1024ull * 1024ull);
-
-        DWORDLONG availMB =
-            mem.ullAvailPhys /
-            (1024ull * 1024ull);
-
-        Log(
-            "[TELEMETRY] RAM_TOTAL=%lluMB RAM_FREE=%lluMB",
-            totalMB,
-            availMB
-        );
-    }
 }
 
-LONG WINAPI RuntimeExceptionHandler(
-    EXCEPTION_POINTERS* info)
-{
-    if (!info)
-        return EXCEPTION_CONTINUE_SEARCH;
-
-    Log(
-        "[EXCEPTION] CODE=0x%08X",
-        info->ExceptionRecord->ExceptionCode
-    );
-
-    return EXCEPTION_CONTINUE_SEARCH;
-}
-
-DWORD WINAPI MaintenanceThread(
-    LPVOID)
+unsigned __stdcall MaintenanceThread(
+    void*)
 {
     SetThreadPriority(
         GetCurrentThread(),
@@ -744,11 +703,11 @@ DWORD WINAPI MaintenanceThread(
         if (result != WAIT_TIMEOUT)
             break;
 
+        RefreshGraphicsHooks();
+
         LogMemoryStatus();
 
         CollectTelemetry();
-
-        RunDiagnostics();
 
         Log(
             "[MAINTENANCE] COMPLETE"
@@ -762,7 +721,7 @@ DWORD WINAPI MaintenanceThread(
     return 0;
 }
 
-void StartMaintenance()
+void StartThreads()
 {
     gStopEvent =
         CreateEventA(
@@ -772,13 +731,12 @@ void StartMaintenance()
             nullptr
         );
 
-    if (!gStopEvent)
-        return;
-
     gRunning = true;
 
+    StartLogger();
+
     gWorkerThread =
-        CreateThread(
+        (HANDLE)_beginthreadex(
             nullptr,
             0,
             MaintenanceThread,
@@ -788,7 +746,7 @@ void StartMaintenance()
         );
 }
 
-void StopMaintenance()
+void StopThreads()
 {
     gRunning = false;
 
@@ -797,11 +755,13 @@ void StopMaintenance()
         SetEvent(gStopEvent);
     }
 
+    StopLogger();
+
     if (gWorkerThread)
     {
         WaitForSingleObject(
             gWorkerThread,
-            2000
+            3000
         );
 
         CloseHandle(
@@ -834,30 +794,15 @@ bool InitializeRuntime(
 
     ApplyAdaptivePolicies();
 
-    if (gEnableExceptionFilter)
-    {
-        SetUnhandledExceptionFilter(
-            RuntimeExceptionHandler
-        );
-
-        Log(
-            "[RUNTIME] EXCEPTION_FILTER_ENABLED"
-        );
-    }
-
     EnableLFH();
 
     ApplyTimerResolution();
-
-    DisablePowerThrottling();
 
     LogMemoryStatus();
 
     CollectTelemetry();
 
-    RunDiagnostics();
-
-    StartMaintenance();
+    StartThreads();
 
     Log(
         "[RUNTIME] INITIALIZED"
@@ -872,7 +817,7 @@ void ShutdownRuntime()
         "[RUNTIME] SHUTDOWN_BEGIN"
     );
 
-    StopMaintenance();
+    StopThreads();
 
     RestoreTimerResolution();
 
@@ -945,17 +890,24 @@ extern "C"
 }
 
 BOOL APIENTRY DllMain(
-    HMODULE,
+    HMODULE hModule,
     DWORD reason,
     LPVOID)
 {
     switch (reason)
     {
+    case DLL_PROCESS_ATTACH:
+    {
+        DisableThreadLibraryCalls(
+            hModule
+        );
+
+        break;
+    }
+
     case DLL_PROCESS_DETACH:
     {
-        ShutdownRuntime();
-
-        CloseLog();
+        gRunning = false;
 
         break;
     }
