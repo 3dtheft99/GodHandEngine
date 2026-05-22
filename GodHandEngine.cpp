@@ -142,9 +142,6 @@ true;
 static bool gEnableTimerResolution =
 false;
 
-static bool gEnablePowerThrottlingPatch =
-true;
-
 static bool gEnableTelemetry =
 true;
 
@@ -229,7 +226,6 @@ void Log(
 
     va_end(args);
 
-    // REMOVE mensagens relacionadas ao DXVK do log
     if (
         strstr(message, "DXVK") != nullptr
         )
@@ -391,14 +387,11 @@ void RefreshGraphicsHooks()
         );
     }
 
-    // DETECÇÃO DXVK MANTIDA
     if (
         currentDXGI &&
         !gCaps.hasDXVK)
     {
         gCaps.hasDXVK = true;
-
-        // LOG REMOVIDO
     }
 }
 
@@ -474,7 +467,6 @@ void DetectPluginStack(
             gCaps.hasModernHeapManagement
             );
 
-    // LOG DXVK REMOVIDO
     Log(
         "[STACK] D3DHOOK=%d DISPLAY=%d",
         gCaps.hasModernD3DHooking,
@@ -515,7 +507,6 @@ void ApplyAdaptivePolicies()
     {
         gEnableLFH = true;
         gEnableTimerResolution = true;
-        gEnablePowerThrottlingPatch = true;
 
         Log(
             "[MODE] LEGACY_STANDALONE"
@@ -528,7 +519,6 @@ void ApplyAdaptivePolicies()
     {
         gEnableLFH = true;
         gEnableTimerResolution = false;
-        gEnablePowerThrottlingPatch = true;
 
         Log(
             "[MODE] ENGINE_FIX_COOPERATIVE"
@@ -541,7 +531,6 @@ void ApplyAdaptivePolicies()
     {
         gEnableLFH = true;
         gEnableTimerResolution = false;
-        gEnablePowerThrottlingPatch = true;
 
         Log(
             "[MODE] DISPLAY_COOPERATIVE"
@@ -554,7 +543,6 @@ void ApplyAdaptivePolicies()
     {
         gEnableLFH = false;
         gEnableTimerResolution = false;
-        gEnablePowerThrottlingPatch = false;
 
         Log(
             "[MODE] FULL_MODERN_STACK"
