@@ -299,12 +299,11 @@ void DetectPluginStack(
             );
 
     Log(
-        "[STACK] AveSithis=%d EngineBugFixes=%d BA_EngineFixes=%d DisplayTweaks=%d DXVK=%d MoreHeap=%d",
+        "[STACK] AveSithis=%d EngineBugFixes=%d BA_EngineFixes=%d DisplayTweaks=%d MoreHeap=%d",
         gCaps.hasAveSithis,
         gCaps.hasEngineBugFixes,
         gCaps.hasBlueEngineFixes,
         gCaps.hasDisplayTweaks,
-        gCaps.hasDXVK,
         gCaps.hasMoreHeap
     );
 }
@@ -588,15 +587,6 @@ void RunDiagnostics()
 {
     if (!gEnableDiagnostics)
         return;
-
-    if (
-        gCaps.hasDisplayTweaks &&
-        gCaps.hasDXVK)
-    {
-        Log(
-            "[DIAGNOSTIC] DisplayTweaks + DXVK detected"
-        );
-    }
 
     if (
         gCaps.hasHeapManager)
