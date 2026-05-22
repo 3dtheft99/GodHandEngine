@@ -19,7 +19,6 @@
 #include <cstring>
 #include <vector>
 #include <atomic>
-#include <string>
 
 #pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "psapi.lib")
@@ -70,7 +69,7 @@ struct PluginInfo
 const char* const MASTER_PLUGIN_NAME =
 "Z_GodHandEngine";
 
-const UInt32 MASTER_PLUGIN_VERSION = 20;
+const UInt32 MASTER_PLUGIN_VERSION = 21;
 
 const char* const MASTER_LOG_PATH =
 "Data\\OBSE\\Plugins\\Z_GodHandEngine.log";
@@ -93,6 +92,10 @@ struct RuntimeCapabilities
     bool hasBlueEngineFixes = false;
     bool hasDisplayTweaks = false;
     bool hasDXVK = false;
+
+    bool hasMoreHeap = false;
+    bool hasHeapManager = false;
+
     bool hasModernFramePacing = false;
     bool hasModernCrashFixes = false;
     bool hasModernHeapManagement = false;
@@ -215,6 +218,15 @@ void CloseLog()
     }
 }
 
+bool IsModuleLoaded(
+    const char* moduleName)
+{
+    return (
+        GetModuleHandleA(moduleName)
+        != nullptr
+        );
+}
+
 void DetectPluginStack(
     const OBSEInterface* obse)
 {
@@ -241,10 +253,20 @@ void DetectPluginStack(
             "oblivion_display_tweaks"
         );
 
+    gCaps.hasMoreHeap =
+        (
+            obse->GetPluginLoaded(
+                "MoreHeap"
+            ) ||
+            IsModuleLoaded(
+                "MoreHeap.dll"
+            )
+            );
+
     gCaps.hasDXVK =
         (
-            GetModuleHandleA("dxgi.dll") ||
-            GetModuleHandleA("d3d11.dll")
+            IsModuleLoaded("dxgi.dll") ||
+            IsModuleLoaded("d3d11.dll")
             );
 
     gCaps.hasModernCrashFixes =
@@ -261,7 +283,8 @@ void DetectPluginStack(
 
     gCaps.hasModernHeapManagement =
         (
-            gCaps.hasEngineBugFixes
+            gCaps.hasEngineBugFixes ||
+            gCaps.hasMoreHeap
             );
 
     gCaps.hasModernD3DHooking =
@@ -269,13 +292,20 @@ void DetectPluginStack(
             gCaps.hasDisplayTweaks
             );
 
+    gCaps.hasHeapManager =
+        (
+            gCaps.hasMoreHeap ||
+            gCaps.hasModernHeapManagement
+            );
+
     Log(
-        "[STACK] AveSithis=%d EngineBugFixes=%d BA_EngineFixes=%d DisplayTweaks=%d DXVK=%d",
+        "[STACK] AveSithis=%d EngineBugFixes=%d BA_EngineFixes=%d DisplayTweaks=%d DXVK=%d MoreHeap=%d",
         gCaps.hasAveSithis,
         gCaps.hasEngineBugFixes,
         gCaps.hasBlueEngineFixes,
         gCaps.hasDisplayTweaks,
-        gCaps.hasDXVK
+        gCaps.hasDXVK,
+        gCaps.hasMoreHeap
     );
 }
 
@@ -372,12 +402,27 @@ void ApplyAdaptivePolicies()
         break;
     }
     }
+
+    if (gCaps.hasHeapManager)
+    {
+        gEnableLFH = false;
+
+        Log(
+            "[COMPAT] External heap manager detected - LFH disabled"
+        );
+    }
 }
 
 void EnableLFH()
 {
     if (!gEnableLFH)
+    {
+        Log(
+            "[LFH] DISABLED_BY_POLICY"
+        );
+
         return;
+    }
 
     DWORD heapCount =
         GetProcessHeaps(
@@ -418,7 +463,13 @@ void EnableLFH()
 void ApplyTimerResolution()
 {
     if (!gEnableTimerResolution)
+    {
+        Log(
+            "[TIMER] DISABLED_BY_POLICY"
+        );
+
         return;
+    }
 
     timeBeginPeriod(1);
 
@@ -449,7 +500,13 @@ typedef BOOL(WINAPI* SetProcessInformationFn)(
 void DisablePowerThrottling()
 {
     if (!gEnablePowerThrottlingPatch)
+    {
+        Log(
+            "[POWER] POLICY_DISABLED"
+        );
+
         return;
+    }
 
     auto kernel =
         GetModuleHandleA(
@@ -538,6 +595,14 @@ void RunDiagnostics()
     {
         Log(
             "[DIAGNOSTIC] DisplayTweaks + DXVK detected"
+        );
+    }
+
+    if (
+        gCaps.hasHeapManager)
+    {
+        Log(
+            "[DIAGNOSTIC] External heap manager active"
         );
     }
 
