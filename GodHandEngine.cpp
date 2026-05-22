@@ -85,7 +85,7 @@ constexpr DWORD kLogFlushIntervalMS =
 3000;
 
 constexpr size_t kMaxLogLines =
-500;
+21;
 
 enum RuntimeMode
 {
