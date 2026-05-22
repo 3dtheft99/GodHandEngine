@@ -229,6 +229,14 @@ void Log(
 
     va_end(args);
 
+    // REMOVE mensagens relacionadas ao DXVK do log
+    if (
+        strstr(message, "DXVK") != nullptr
+        )
+    {
+        return;
+    }
+
     SYSTEMTIME st{};
 
     GetLocalTime(&st);
@@ -383,15 +391,14 @@ void RefreshGraphicsHooks()
         );
     }
 
+    // DETECÇÃO DXVK MANTIDA
     if (
         currentDXGI &&
         !gCaps.hasDXVK)
     {
         gCaps.hasDXVK = true;
 
-        Log(
-            "[GRAPHICS] DXVK_DETECTED"
-        );
+        // LOG REMOVIDO
     }
 }
 
@@ -467,9 +474,9 @@ void DetectPluginStack(
             gCaps.hasModernHeapManagement
             );
 
+    // LOG DXVK REMOVIDO
     Log(
-        "[STACK] DXVK=%d D3DHOOK=%d DISPLAY=%d",
-        gCaps.hasDXVK,
+        "[STACK] D3DHOOK=%d DISPLAY=%d",
         gCaps.hasModernD3DHooking,
         gCaps.hasDisplayTweaks
     );
