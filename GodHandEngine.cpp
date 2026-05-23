@@ -142,6 +142,15 @@ true;
 static bool gEnableTimerResolution =
 false;
 
+static bool gEnablePriorityBoost =
+false;
+
+static bool gEnableWorkingSetTrim =
+false;
+
+static bool gEnableHeapCompaction =
+false;
+
 static bool gEnableTelemetry =
 true;
 
@@ -168,16 +177,28 @@ void OpenLog()
         GENERIC_WRITE,
         FILE_SHARE_READ,
         nullptr,
-        CREATE_ALWAYS,
+        OPEN_ALWAYS,
         FILE_ATTRIBUTE_NORMAL,
         nullptr
     );
+
+    if (gLogFile != INVALID_HANDLE_VALUE)
+    {
+        SetFilePointer(
+            gLogFile,
+            0,
+            nullptr,
+            FILE_END
+        );
+    }
 }
 
 void CloseLog()
 {
     if (gLogFile != INVALID_HANDLE_VALUE)
     {
+        FlushFileBuffers(gLogFile);
+
         CloseHandle(gLogFile);
 
         gLogFile =
@@ -201,7 +222,10 @@ void PushLogLine(
         gLogBuffer.pop_front();
     }
 
-    SetEvent(gLogEvent);
+    if (gLogEvent)
+    {
+        SetEvent(gLogEvent);
+    }
 }
 
 void Log(
@@ -285,6 +309,9 @@ unsigned __stdcall LoggerThread(
 
             ResetEvent(gLogEvent);
         }
+
+        if (gLogFile == INVALID_HANDLE_VALUE)
+            continue;
 
         SetFilePointer(
             gLogFile,
@@ -508,6 +535,10 @@ void ApplyAdaptivePolicies()
         gEnableLFH = true;
         gEnableTimerResolution = true;
 
+        gEnablePriorityBoost = false;
+        gEnableWorkingSetTrim = false;
+        gEnableHeapCompaction = false;
+
         Log(
             "[MODE] LEGACY_STANDALONE"
         );
@@ -518,7 +549,11 @@ void ApplyAdaptivePolicies()
     case MODE_ENGINE_FIX_COOPERATIVE:
     {
         gEnableLFH = true;
-        gEnableTimerResolution = false;
+        gEnableTimerResolution = true;
+
+        gEnablePriorityBoost = true;
+        gEnableWorkingSetTrim = false;
+        gEnableHeapCompaction = true;
 
         Log(
             "[MODE] ENGINE_FIX_COOPERATIVE"
@@ -530,7 +565,11 @@ void ApplyAdaptivePolicies()
     case MODE_DISPLAY_COOPERATIVE:
     {
         gEnableLFH = true;
-        gEnableTimerResolution = false;
+        gEnableTimerResolution = true;
+
+        gEnablePriorityBoost = true;
+        gEnableWorkingSetTrim = true;
+        gEnableHeapCompaction = true;
 
         Log(
             "[MODE] DISPLAY_COOPERATIVE"
@@ -541,8 +580,12 @@ void ApplyAdaptivePolicies()
 
     case MODE_FULL_MODERN_STACK:
     {
-        gEnableLFH = false;
-        gEnableTimerResolution = false;
+        gEnableLFH = true;
+        gEnableTimerResolution = true;
+
+        gEnablePriorityBoost = true;
+        gEnableWorkingSetTrim = true;
+        gEnableHeapCompaction = true;
 
         Log(
             "[MODE] FULL_MODERN_STACK"
@@ -633,6 +676,74 @@ void RestoreTimerResolution()
     );
 }
 
+void ApplyPriorityBoost()
+{
+    if (!gEnablePriorityBoost)
+        return;
+
+    SetPriorityClass(
+        GetCurrentProcess(),
+        ABOVE_NORMAL_PRIORITY_CLASS
+    );
+
+    Log(
+        "[PRIORITY] ABOVE_NORMAL"
+    );
+}
+
+void CompactHeaps()
+{
+    if (!gEnableHeapCompaction)
+        return;
+
+    DWORD heapCount =
+        GetProcessHeaps(
+            0,
+            nullptr
+        );
+
+    if (!heapCount)
+        return;
+
+    std::vector<HANDLE> heaps(
+        heapCount
+    );
+
+    heapCount =
+        GetProcessHeaps(
+            heapCount,
+            heaps.data()
+        );
+
+    for (DWORD i = 0; i < heapCount; i++)
+    {
+        HeapCompact(
+            heaps[i],
+            0
+        );
+    }
+
+    Log(
+        "[HEAP] COMPACTED"
+    );
+}
+
+void TrimWorkingSet()
+{
+    if (!gEnableWorkingSetTrim)
+        return;
+
+    SetProcessWorkingSetSize(
+        GetCurrentProcess(),
+        (SIZE_T)-1,
+        (SIZE_T)-1
+    );
+
+    Log(
+        "[MEMORY] WORKING_SET_TRIM"
+    );
+}
+
 void LogMemoryStatus()
 {
     PROCESS_MEMORY_COUNTERS pmc{};
@@ -699,6 +810,10 @@ unsigned __stdcall MaintenanceThread(
             break;
 
         RefreshGraphicsHooks();
+
+        CompactHeaps();
+
+        TrimWorkingSet();
 
         LogMemoryStatus();
 
@@ -793,6 +908,12 @@ bool InitializeRuntime(
 
     ApplyTimerResolution();
 
+    ApplyPriorityBoost();
+
+    CompactHeaps();
+
+    TrimWorkingSet();
+
     LogMemoryStatus();
 
     CollectTelemetry();
@@ -819,6 +940,8 @@ void ShutdownRuntime()
     Log(
         "[RUNTIME] SHUTDOWN_END"
     );
+
+    CloseLog();
 }
 
 extern "C"
@@ -903,6 +1026,8 @@ BOOL APIENTRY DllMain(
     case DLL_PROCESS_DETACH:
     {
         gRunning = false;
+
+        ShutdownRuntime();
 
         break;
     }
