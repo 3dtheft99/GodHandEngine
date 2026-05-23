@@ -33,6 +33,18 @@ struct CommandInfo;
 
 typedef UInt32 PluginHandle;
 
+typedef LONG(WINAPI* NtSetTimerResolutionFn)(
+    ULONG,
+    BOOLEAN,
+    PULONG
+    );
+
+typedef LONG(WINAPI* NtQueryTimerResolutionFn)(
+    PULONG,
+    PULONG,
+    PULONG
+    );
+
 struct OBSEInterface
 {
     UInt32 obseVersion;
@@ -86,6 +98,9 @@ constexpr DWORD kLogFlushIntervalMS =
 
 constexpr size_t kMaxLogLines =
 21;
+
+constexpr ULONG kDesiredTimerResolution100ns =
+5000;
 
 enum RuntimeMode
 {
@@ -160,6 +175,21 @@ true;
 static std::deque<std::string> gLogBuffer;
 
 static std::mutex gLogMutex;
+
+static NtSetTimerResolutionFn gNtSetTimerResolution =
+nullptr;
+
+static NtQueryTimerResolutionFn gNtQueryTimerResolution =
+nullptr;
+
+static bool gNtTimerActive =
+false;
+
+static ULONG gAppliedTimerResolution =
+0;
+
+static UINT gWinMMPeriod =
+0;
 
 bool IsModuleLoaded(
     const char* moduleName)
@@ -236,13 +266,6 @@ void Log(
     );
 
     va_end(args);
-
-    if (
-        strstr(message, "DXVK") != nullptr
-        )
-    {
-        return;
-    }
 
     SYSTEMTIME st{};
 
@@ -349,6 +372,174 @@ void StartLogger()
         );
 }
 
+void InitializeNTTimerAPI()
+{
+    HMODULE ntdll =
+        GetModuleHandleA(
+            "ntdll.dll"
+        );
+
+    if (!ntdll)
+        return;
+
+    gNtSetTimerResolution =
+        reinterpret_cast<NtSetTimerResolutionFn>(
+            GetProcAddress(
+                ntdll,
+                "NtSetTimerResolution"
+            )
+            );
+
+    gNtQueryTimerResolution =
+        reinterpret_cast<NtQueryTimerResolutionFn>(
+            GetProcAddress(
+                ntdll,
+                "NtQueryTimerResolution"
+            )
+            );
+
+    if (
+        gNtSetTimerResolution &&
+        gNtQueryTimerResolution)
+    {
+        Log(
+            "[NTTIMER] API_READY"
+        );
+    }
+}
+
+void ApplyTimerResolution()
+{
+    if (!gEnableTimerResolution)
+        return;
+
+    InitializeNTTimerAPI();
+
+    if (
+        gCaps.hasDXVK ||
+        gCaps.hasDisplayTweaks)
+    {
+        Log(
+            "[NTTIMER] SKIPPED_MODERN_FRAMEPACER"
+        );
+
+        return;
+    }
+
+    if (
+        gNtSetTimerResolution &&
+        gNtQueryTimerResolution)
+    {
+        ULONG minimum =
+            0;
+
+        ULONG maximum =
+            0;
+
+        ULONG current =
+            0;
+
+        if (
+            gNtQueryTimerResolution(
+                &maximum,
+                &minimum,
+                &current
+            ) >= 0)
+        {
+            ULONG desired =
+                kDesiredTimerResolution100ns;
+
+            if (desired < minimum)
+            {
+                desired = minimum;
+            }
+
+            if (desired > maximum)
+            {
+                desired = maximum;
+            }
+
+            ULONG actual =
+                0;
+
+            LONG status =
+                gNtSetTimerResolution(
+                    desired,
+                    TRUE,
+                    &actual
+                );
+
+            if (status >= 0)
+            {
+                gNtTimerActive =
+                    true;
+
+                gAppliedTimerResolution =
+                    desired;
+
+                Log(
+                    "[NTTIMER] ACTIVE %.3fms",
+                    actual / 10000.0
+                );
+
+                return;
+            }
+
+            Log(
+                "[NTTIMER] FAILED 0x%08X",
+                status
+            );
+        }
+    }
+
+    if (
+        timeBeginPeriod(1) ==
+        TIMERR_NOERROR)
+    {
+        gWinMMPeriod = 1;
+
+        Log(
+            "[WINMM] TIMER_1MS"
+        );
+    }
+}
+
+void RestoreTimerResolution()
+{
+    if (
+        gNtTimerActive &&
+        gNtSetTimerResolution)
+    {
+        ULONG current = 0;
+
+        gNtSetTimerResolution(
+            gAppliedTimerResolution,
+            FALSE,
+            &current
+        );
+
+        gNtTimerActive =
+            false;
+
+        Log(
+            "[NTTIMER] RESTORED"
+        );
+    }
+
+    if (gWinMMPeriod)
+    {
+        timeEndPeriod(
+            gWinMMPeriod
+        );
+
+        gWinMMPeriod = 0;
+
+        Log(
+            "[WINMM] RESTORED"
+        );
+    }
+}
+
 void RefreshGraphicsHooks()
 {
     bool currentD3D9 =
@@ -447,12 +638,6 @@ void DetectPluginStack(
             gCaps.hasMoreHeap ||
             gCaps.hasModernHeapManagement
             );
-
-    Log(
-        "[STACK] D3DHOOK=%d DISPLAY=%d",
-        gCaps.hasModernD3DHooking,
-        gCaps.hasDisplayTweaks
-    );
 }
 
 void ApplyAdaptivePolicies()
@@ -482,93 +667,28 @@ void ApplyAdaptivePolicies()
             MODE_LEGACY_STANDALONE;
     }
 
-    switch (gRuntimeMode)
-    {
-    case MODE_LEGACY_STANDALONE:
-    {
-        gEnableLFH = true;
-        gEnableTimerResolution = true;
+    gEnableLFH = true;
+    gEnableTimerResolution = true;
 
-        gEnablePriorityBoost = false;
-        gEnableWorkingSetTrim = false;
-        gEnableHeapCompaction = false;
+    gEnablePriorityBoost =
+        gRuntimeMode != MODE_LEGACY_STANDALONE;
 
-        Log(
-            "[MODE] LEGACY_STANDALONE"
-        );
+    gEnableWorkingSetTrim =
+        gRuntimeMode >= MODE_DISPLAY_COOPERATIVE;
 
-        break;
-    }
-
-    case MODE_ENGINE_FIX_COOPERATIVE:
-    {
-        gEnableLFH = true;
-        gEnableTimerResolution = true;
-
-        gEnablePriorityBoost = true;
-        gEnableWorkingSetTrim = false;
-        gEnableHeapCompaction = true;
-
-        Log(
-            "[MODE] ENGINE_FIX_COOPERATIVE"
-        );
-
-        break;
-    }
-
-    case MODE_DISPLAY_COOPERATIVE:
-    {
-        gEnableLFH = true;
-        gEnableTimerResolution = true;
-
-        gEnablePriorityBoost = true;
-        gEnableWorkingSetTrim = true;
-        gEnableHeapCompaction = true;
-
-        Log(
-            "[MODE] DISPLAY_COOPERATIVE"
-        );
-
-        break;
-    }
-
-    case MODE_FULL_MODERN_STACK:
-    {
-        gEnableLFH = true;
-        gEnableTimerResolution = true;
-
-        gEnablePriorityBoost = true;
-        gEnableWorkingSetTrim = true;
-        gEnableHeapCompaction = true;
-
-        Log(
-            "[MODE] FULL_MODERN_STACK"
-        );
-
-        break;
-    }
-    }
+    gEnableHeapCompaction =
+        gRuntimeMode >= MODE_ENGINE_FIX_COOPERATIVE;
 
     if (gCaps.hasHeapManager)
     {
         gEnableLFH = false;
-
-        Log(
-            "[COMPAT] EXTERNAL_HEAP_MANAGER"
-        );
     }
 }
 
 void EnableLFH()
 {
     if (!gEnableLFH)
-    {
-        Log(
-            "[LFH] DISABLED"
-        );
-
         return;
-    }
 
     DWORD heapCount =
         GetProcessHeaps(
@@ -603,18 +723,6 @@ void EnableLFH()
 
     Log(
         "[LFH] ENABLED"
-    );
-}
-
-void ApplyTimerResolution()
-{
-    if (!gEnableTimerResolution)
-        return;
-
-    timeBeginPeriod(1);
-
-    Log(
-        "[TIMER] 1MS"
     );
 }
 
@@ -686,46 +794,78 @@ void TrimWorkingSet()
     );
 }
 
-void LogMemoryStatus()
+void ShutdownRuntime()
 {
-    PROCESS_MEMORY_COUNTERS pmc{};
+    gRunning = false;
 
-    if (!GetProcessMemoryInfo(
-        GetCurrentProcess(),
-        &pmc,
-        sizeof(pmc)))
+    if (gStopEvent)
     {
-        return;
+        SetEvent(
+            gStopEvent
+        );
     }
 
-    SIZE_T workingSetMB =
-        pmc.WorkingSetSize /
-        (1024 * 1024);
+    if (gWorkerThread)
+    {
+        WaitForSingleObject(
+            gWorkerThread,
+            3000
+        );
 
-    SIZE_T privateMB =
-        pmc.PagefileUsage /
-        (1024 * 1024);
+        CloseHandle(
+            gWorkerThread
+        );
 
-    Log(
-        "[MEMORY] WS=%zuMB PRIVATE=%zuMB",
-        workingSetMB,
-        privateMB
-    );
-}
+        gWorkerThread =
+            nullptr;
+    }
 
-void CollectTelemetry()
-{
-    if (!gEnableTelemetry)
-        return;
+    if (gLoggerThread)
+    {
+        WaitForSingleObject(
+            gLoggerThread,
+            3000
+        );
 
-    SYSTEM_INFO si{};
+        CloseHandle(
+            gLoggerThread
+        );
 
-    GetSystemInfo(&si);
+        gLoggerThread =
+            nullptr;
+    }
 
-    Log(
-        "[CPU] CORES=%u",
-        si.dwNumberOfProcessors
-    );
+    if (gStopEvent)
+    {
+        CloseHandle(
+            gStopEvent
+        );
+
+        gStopEvent =
+            nullptr;
+    }
+
+    if (gLogEvent)
+    {
+        CloseHandle(
+            gLogEvent
+        );
+
+        gLogEvent =
+            nullptr;
+    }
+
+    RestoreTimerResolution();
+
+    if (gLogFile != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(
+            gLogFile
+        );
+
+        gLogFile =
+            INVALID_HANDLE_VALUE;
+    }
 }
 
 unsigned __stdcall MaintenanceThread(
@@ -734,10 +874,6 @@ unsigned __stdcall MaintenanceThread(
     SetThreadPriority(
         GetCurrentThread(),
         THREAD_PRIORITY_BELOW_NORMAL
-    );
-
-    Log(
-        "[THREAD] MAINTENANCE_STARTED"
     );
 
     while (gRunning)
@@ -757,18 +893,10 @@ unsigned __stdcall MaintenanceThread(
 
         TrimWorkingSet();
 
-        LogMemoryStatus();
-
-        CollectTelemetry();
-
         Log(
             "[MAINTENANCE] COMPLETE"
         );
     }
-
-    Log(
-        "[THREAD] MAINTENANCE_STOPPED"
-    );
 
     return 0;
 }
@@ -801,10 +929,6 @@ void StartThreads()
 bool InitializeRuntime(
     const OBSEInterface* obse)
 {
-    Log(
-        "[RUNTIME] INITIALIZING"
-    );
-
     DetectPluginStack(obse);
 
     ApplyAdaptivePolicies();
@@ -818,10 +942,6 @@ bool InitializeRuntime(
     CompactHeaps();
 
     TrimWorkingSet();
-
-    LogMemoryStatus();
-
-    CollectTelemetry();
 
     StartThreads();
 
@@ -868,10 +988,6 @@ extern "C"
             return false;
         }
 
-        Log(
-            "[QUERY] SUCCESS"
-        );
-
         return true;
     }
 
@@ -884,13 +1000,7 @@ extern "C"
             return false;
         }
 
-        InitializeRuntime(obse);
-
-        Log(
-            "[LOAD] SUCCESS"
-        );
-
-        return true;
+        return InitializeRuntime(obse);
     }
 
 }
@@ -905,6 +1015,12 @@ BOOL APIENTRY DllMain(
         DisableThreadLibraryCalls(
             hModule
         );
+    }
+    else if (
+        reason ==
+        DLL_PROCESS_DETACH)
+    {
+        ShutdownRuntime();
     }
 
     return TRUE;
