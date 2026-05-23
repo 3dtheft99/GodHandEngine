@@ -193,19 +193,6 @@ void OpenLog()
     }
 }
 
-void CloseLog()
-{
-    if (gLogFile != INVALID_HANDLE_VALUE)
-    {
-        FlushFileBuffers(gLogFile);
-
-        CloseHandle(gLogFile);
-
-        gLogFile =
-            INVALID_HANDLE_VALUE;
-    }
-}
-
 void PushLogLine(
     const char* text)
 {
@@ -360,39 +347,6 @@ void StartLogger()
             0,
             nullptr
         );
-}
-
-void StopLogger()
-{
-    if (gLogEvent)
-    {
-        SetEvent(gLogEvent);
-    }
-
-    if (gLoggerThread)
-    {
-        WaitForSingleObject(
-            gLoggerThread,
-            3000
-        );
-
-        CloseHandle(
-            gLoggerThread
-        );
-
-        gLoggerThread =
-            nullptr;
-    }
-
-    if (gLogEvent)
-    {
-        CloseHandle(
-            gLogEvent
-        );
-
-        gLogEvent =
-            nullptr;
-    }
 }
 
 void RefreshGraphicsHooks()
@@ -664,18 +618,6 @@ void ApplyTimerResolution()
     );
 }
 
-void RestoreTimerResolution()
-{
-    if (!gEnableTimerResolution)
-        return;
-
-    timeEndPeriod(1);
-
-    Log(
-        "[TIMER] RESTORED"
-    );
-}
-
 void ApplyPriorityBoost()
 {
     if (!gEnablePriorityBoost)
@@ -856,43 +798,6 @@ void StartThreads()
         );
 }
 
-void StopThreads()
-{
-    gRunning = false;
-
-    if (gStopEvent)
-    {
-        SetEvent(gStopEvent);
-    }
-
-    StopLogger();
-
-    if (gWorkerThread)
-    {
-        WaitForSingleObject(
-            gWorkerThread,
-            3000
-        );
-
-        CloseHandle(
-            gWorkerThread
-        );
-
-        gWorkerThread =
-            nullptr;
-    }
-
-    if (gStopEvent)
-    {
-        CloseHandle(
-            gStopEvent
-        );
-
-        gStopEvent =
-            nullptr;
-    }
-}
-
 bool InitializeRuntime(
     const OBSEInterface* obse)
 {
@@ -925,23 +830,6 @@ bool InitializeRuntime(
     );
 
     return true;
-}
-
-void ShutdownRuntime()
-{
-    Log(
-        "[RUNTIME] SHUTDOWN_BEGIN"
-    );
-
-    StopThreads();
-
-    RestoreTimerResolution();
-
-    Log(
-        "[RUNTIME] SHUTDOWN_END"
-    );
-
-    CloseLog();
 }
 
 extern "C"
@@ -1012,25 +900,11 @@ BOOL APIENTRY DllMain(
     DWORD reason,
     LPVOID)
 {
-    switch (reason)
-    {
-    case DLL_PROCESS_ATTACH:
+    if (reason == DLL_PROCESS_ATTACH)
     {
         DisableThreadLibraryCalls(
             hModule
         );
-
-        break;
-    }
-
-    case DLL_PROCESS_DETACH:
-    {
-        gRunning = false;
-
-        ShutdownRuntime();
-
-        break;
-    }
     }
 
     return TRUE;
