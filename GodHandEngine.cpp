@@ -99,6 +99,9 @@ constexpr DWORD kLogFlushIntervalMS =
 constexpr ULONG kDesiredTimerResolution100ns =
 5000;
 
+constexpr size_t kMaxLogQueue =
+1024;
+
 enum RuntimeMode
 {
     MODE_LEGACY_STANDALONE = 0,
@@ -146,6 +149,9 @@ static HANDLE gLogEvent =
 nullptr;
 
 static std::atomic_bool gRunning =
+false;
+
+static std::atomic_bool gShutdownStarted =
 false;
 
 static bool gEnableLFH =
@@ -234,6 +240,11 @@ void PushLogLine(
     std::lock_guard<std::mutex> lock(
         gLogMutex
     );
+
+    if (gLogBuffer.size() >= kMaxLogQueue)
+    {
+        gLogBuffer.pop_front();
+    }
 
     gLogBuffer.push_back(text);
 
@@ -404,6 +415,9 @@ void ApplyTimerResolution()
     if (!gEnableTimerResolution)
         return;
 
+    if (gNtTimerActive || gWinMMPeriod)
+        return;
+
     InitializeNTTimerAPI();
 
     if (
@@ -523,10 +537,23 @@ void OptimizeScheduler()
         THREAD_PRIORITY_HIGHEST
     );
 
-    SetThreadIdealProcessor(
-        GetCurrentThread(),
-        0
-    );
+    DWORD_PTR processMask = 0;
+    DWORD_PTR systemMask = 0;
+
+    if (GetProcessAffinityMask(GetCurrentProcess(), &processMask, &systemMask))
+    {
+        DWORD targetCpu = 0;
+        for (DWORD i = 0; i < sizeof(DWORD_PTR) * 8; ++i)
+        {
+            if (processMask & (static_cast<DWORD_PTR>(1) << i))
+            {
+                targetCpu = i;
+                break;
+            }
+        }
+
+        SetThreadIdealProcessor(GetCurrentThread(), targetCpu);
+    }
 }
 
 void EnableBackgroundResponsiveness()
@@ -762,6 +789,11 @@ void ApplyPriorityBoost()
 
 void ShutdownRuntime()
 {
+    if (gShutdownStarted.exchange(true))
+    {
+        return;
+    }
+
     gRunning = false;
 
     if (gStopEvent)
@@ -771,7 +803,9 @@ void ShutdownRuntime()
         );
     }
 
-    if (gWorkerThread)
+    if (
+        gWorkerThread &&
+        gWorkerThread != INVALID_HANDLE_VALUE)
     {
         WaitForSingleObject(
             gWorkerThread,
@@ -786,7 +820,9 @@ void ShutdownRuntime()
             nullptr;
     }
 
-    if (gLoggerThread)
+    if (
+        gLoggerThread &&
+        gLoggerThread != INVALID_HANDLE_VALUE)
     {
         WaitForSingleObject(
             gLoggerThread,
@@ -819,6 +855,24 @@ void ShutdownRuntime()
 
         gLogEvent =
             nullptr;
+    }
+
+    {
+        std::deque<std::string> remaining;
+        {
+            std::lock_guard<std::mutex> lock(gLogMutex);
+            remaining.swap(gLogBuffer);
+        }
+
+        if (gLogFile != INVALID_HANDLE_VALUE)
+        {
+            for (const auto& line : remaining)
+            {
+                DWORD written = 0;
+                WriteFile(gLogFile, line.c_str(), (DWORD)line.size(), &written, nullptr);
+            }
+            FlushFileBuffers(gLogFile);
+        }
     }
 
     RestoreTimerResolution();
