@@ -194,6 +194,24 @@ static std::deque<std::string> gLogBuffer;
 
 static std::mutex gLogMutex;
 
+void Log(
+    const char* fmt,
+    ...
+);
+
+bool IsModuleLoaded(
+    const char* moduleName);
+
+void DetectLateRuntimeModules()
+;
+
+const char* RuntimeModeToString();
+
+void OpenLog();
+
+void PushLogLine(
+    const char* text);
+
 bool IsModuleLoaded(
     const char* moduleName)
 {
@@ -201,6 +219,48 @@ bool IsModuleLoaded(
         GetModuleHandleA(moduleName)
         != nullptr
         );
+}
+
+void DetectLateRuntimeModules()
+{
+    bool lateDXVK =
+        (
+            IsModuleLoaded("dxgi.dll") ||
+            IsModuleLoaded("d3d11.dll") ||
+            IsModuleLoaded("dxvk.dll") ||
+            IsModuleLoaded("d3d9_dxvk.dll") ||
+            IsModuleLoaded("d3d11_dxvk.dll")
+            );
+
+    if (
+        lateDXVK &&
+        !gCaps.hasDXVK)
+    {
+        gCaps.hasDXVK =
+            true;
+
+        Log(
+            "DXVK late-detected"
+        );
+    }
+
+    bool lateMoreHeap =
+        (
+            IsModuleLoaded("MoreHeap.dll") ||
+            IsModuleLoaded("moreheap.dll")
+            );
+
+    if (
+        lateMoreHeap &&
+        !gCaps.hasMoreHeap)
+    {
+        gCaps.hasMoreHeap =
+            true;
+
+        Log(
+            "MoreHeap late-detected"
+        );
+    }
 }
 
 const char* RuntimeModeToString()
@@ -441,8 +501,8 @@ void ApplyTimerResolution()
 
         if (
             gNtQueryTimerResolution(
-                &maximum,
                 &minimum,
+                &maximum,
                 &current
             ) >= 0)
         {
@@ -459,25 +519,17 @@ void ApplyTimerResolution()
                 desired = maximum;
             }
 
-            ULONG actual = 0;
-
-            LONG status =
+            if (
                 gNtSetTimerResolution(
                     desired,
                     TRUE,
-                    &actual
-                );
-
-            if (status >= 0)
+                    &gAppliedTimerResolution
+                ) >= 0)
             {
-                gNtTimerActive =
-                    true;
-
-                gAppliedTimerResolution =
-                    desired;
+                gNtTimerActive = true;
 
                 Log(
-                    "NT timer resolution active"
+                    "NT timer resolution applied"
                 );
 
                 return;
@@ -485,15 +537,35 @@ void ApplyTimerResolution()
         }
     }
 
-    if (
-        timeBeginPeriod(1) ==
-        TIMERR_NOERROR)
-    {
-        gWinMMPeriod = 1;
+    TIMECAPS tc{};
 
-        Log(
-            "WinMM timer fallback active"
-        );
+    if (
+        timeGetDevCaps(
+            &tc,
+            sizeof(tc)
+        ) == TIMERR_NOERROR)
+    {
+        UINT desired =
+            min(
+                max(
+                    tc.wPeriodMin,
+                    1u
+                ),
+                tc.wPeriodMax
+            );
+
+        if (
+            timeBeginPeriod(
+                desired
+            ) == TIMERR_NOERROR)
+        {
+            gWinMMPeriod =
+                desired;
+
+            Log(
+                "WinMM timer resolution applied"
+            );
+        }
     }
 }
 
@@ -521,110 +593,67 @@ void RestoreTimerResolution()
             gWinMMPeriod
         );
 
-        gWinMMPeriod = 0;
+        gWinMMPeriod =
+            0;
     }
 }
-
-
 
 void OptimizeScheduler()
 {
-    if (!gEnableDynamicSleepGranularity)
-        return;
+    HANDLE process =
+        GetCurrentProcess();
 
-    SetThreadPriority(
-        GetCurrentThread(),
-        THREAD_PRIORITY_HIGHEST
+    SetPriorityClass(
+        process,
+        ABOVE_NORMAL_PRIORITY_CLASS
     );
 
-    DWORD_PTR processMask = 0;
-    DWORD_PTR systemMask = 0;
-
-    if (GetProcessAffinityMask(GetCurrentProcess(), &processMask, &systemMask))
+    if (gEnablePriorityBoost)
     {
-        DWORD targetCpu = 0;
-        for (DWORD i = 0; i < sizeof(DWORD_PTR) * 8; ++i)
-        {
-            if (processMask & (static_cast<DWORD_PTR>(1) << i))
-            {
-                targetCpu = i;
-                break;
-            }
-        }
-
-        SetThreadIdealProcessor(GetCurrentThread(), targetCpu);
+        SetProcessPriorityBoost(
+            process,
+            FALSE
+        );
     }
+
+    Log(
+        "Scheduler optimized"
+    );
 }
 
-void EnableBackgroundResponsiveness()
+void EnableLFH()
 {
-    if (!gEnableBackgroundMode)
+    if (!gEnableLFH)
         return;
 
-    HMODULE user32 =
-        GetModuleHandleA(
-            "user32.dll"
+    ULONG heapInfo = 2;
+
+    HANDLE heaps[128]{};
+
+    DWORD count =
+        GetProcessHeaps(
+            128,
+            heaps
         );
 
-    if (!user32)
-        return;
-
-    typedef BOOL(WINAPI* SetProcessDPIAwareFn)();
-
-    auto setAware =
-        reinterpret_cast<SetProcessDPIAwareFn>(
-            GetProcAddress(
-                user32,
-                "SetProcessDPIAware"
-            )
-            );
-
-    if (setAware)
+    for (DWORD i = 0; i < count; ++i)
     {
-        setAware();
+        HeapSetInformation(
+            heaps[i],
+            HeapCompatibilityInformation,
+            &heapInfo,
+            sizeof(heapInfo)
+        );
     }
-}
 
-void StabilizeMemorySubsystem()
-{
-    HeapSetInformation(
-        nullptr,
-        HeapEnableTerminationOnCorruption,
-        nullptr,
-        0
+    Log(
+        "LFH enabled"
     );
-
-    SetProcessWorkingSetSize(
-        GetCurrentProcess(),
-        (SIZE_T)-1,
-        (SIZE_T)-1
-    );
-}
-
-void ApplyRendererCompatibilityPolicies()
-{
-    if (
-        gCaps.hasDXVK ||
-        gCaps.hasDisplayTweaks)
-    {
-        gEnableDynamicSleepGranularity =
-            false;
-    }
-
-    if (
-        gCaps.hasModernFramePacing)
-    {
-        gEnablePriorityBoost =
-            false;
-    }
 }
 
 void DetectPluginStack(
-    const OBSEInterface* obse)
+    OBSEInterface* obse)
 {
-    if (!obse)
-        return;
-
     gCaps.hasAveSithis =
         obse->GetPluginLoaded(
             "AveSithisEngineFixes"
@@ -637,13 +666,22 @@ void DetectPluginStack(
 
     gCaps.hasBlueEngineFixes =
         obse->GetPluginLoaded(
-            "BA_EngineFixes"
+            "BlueEngineFixes"
         );
 
-    gCaps.hasDisplayTweaks =
-        obse->GetPluginLoaded(
-            "oblivion_display_tweaks"
+    gCaps.hasDisplayTweaks =       
+            obse->GetPluginLoaded(
+                "oblivion_display_tweaks"
         );
+
+    gCaps.hasDXVK =
+        (
+            IsModuleLoaded("dxgi.dll") ||
+            IsModuleLoaded("d3d11.dll") ||
+            IsModuleLoaded("dxvk.dll") ||
+            IsModuleLoaded("d3d9_dxvk.dll") ||
+            IsModuleLoaded("d3d11_dxvk.dll")       
+            );
 
     gCaps.hasMoreHeap =
         (
@@ -652,63 +690,52 @@ void DetectPluginStack(
             ) ||
             IsModuleLoaded(
                 "MoreHeap.dll"
+            ) ||
+            IsModuleLoaded(
+                "moreheap.dll"
             )
-            );
-
-    gCaps.hasDXVK =
-        (
-            IsModuleLoaded("dxgi.dll") ||
-            IsModuleLoaded("d3d11.dll")
             );
 
     gCaps.hasModernD3DHooking =
         (
-            IsModuleLoaded("d3d9.dll") ||
+            gCaps.hasDXVK ||
+            gCaps.hasDisplayTweaks
+            );
+
+    gCaps.hasModernFramePacing =
+        (
+            gCaps.hasDXVK ||
             gCaps.hasDisplayTweaks
             );
 
     gCaps.hasModernCrashFixes =
         (
             gCaps.hasAveSithis ||
-            gCaps.hasEngineBugFixes
-            );
-
-    gCaps.hasModernFramePacing =
-        (
-            gCaps.hasDisplayTweaks ||
-            gCaps.hasDXVK
+            gCaps.hasEngineBugFixes ||
+            gCaps.hasBlueEngineFixes
             );
 
     gCaps.hasModernHeapManagement =
         (
-            gCaps.hasEngineBugFixes ||
-            gCaps.hasMoreHeap
-            );
-
-    gCaps.hasHeapManager =
-        (
             gCaps.hasMoreHeap ||
-            gCaps.hasModernHeapManagement
+            gCaps.hasEngineBugFixes
             );
-}
 
-void ApplyAdaptivePolicies()
-{
     if (
-        gCaps.hasModernCrashFixes &&
-        gCaps.hasModernFramePacing)
+        gCaps.hasModernFramePacing &&
+        gCaps.hasModernCrashFixes)
     {
         gRuntimeMode =
             MODE_FULL_MODERN_STACK;
     }
     else if (
-        gCaps.hasModernFramePacing)
+        gCaps.hasDisplayTweaks)
     {
         gRuntimeMode =
             MODE_DISPLAY_COOPERATIVE;
     }
     else if (
-        gCaps.hasModernCrashFixes)
+        gCaps.hasEngineBugFixes)
     {
         gRuntimeMode =
             MODE_ENGINE_FIX_COOPERATIVE;
@@ -719,82 +746,81 @@ void ApplyAdaptivePolicies()
             MODE_LEGACY_STANDALONE;
     }
 
-    gEnableLFH = true;
-
-    gEnablePriorityBoost =
-        gRuntimeMode !=
-        MODE_LEGACY_STANDALONE;
-
-    if (gCaps.hasHeapManager)
-    {
-        gEnableLFH = false;
-    }
-}
-
-void EnableLFH()
-{
-    if (!gEnableLFH)
-        return;
-
-    DWORD heapCount =
-        GetProcessHeaps(
-            0,
-            nullptr
-        );
-
-    if (!heapCount)
-        return;
-
-    std::vector<HANDLE> heaps(
-        heapCount
-    );
-
-    heapCount =
-        GetProcessHeaps(
-            heapCount,
-            heaps.data()
-        );
-
-    ULONG mode = 2;
-
-    for (DWORD i = 0; i < heapCount; i++)
-    {
-        HeapSetInformation(
-            heaps[i],
-            HeapCompatibilityInformation,
-            &mode,
-            sizeof(mode)
-        );
-    }
-
     Log(
-        "LFH enabled"
+        "Runtime mode: %s",
+        RuntimeModeToString()
     );
 }
 
-void ApplyPriorityBoost()
+
+unsigned __stdcall MaintenanceThread(
+    void*)
 {
-    if (!gEnablePriorityBoost)
-        return;
+    OptimizeScheduler();
 
-    SetPriorityClass(
-        GetCurrentProcess(),
-        ABOVE_NORMAL_PRIORITY_CLASS
-    );
+    Sleep(3000);
 
-    Log(
-        "Priority boost enabled"
-    );
+    DetectLateRuntimeModules();
+
+    while (gRunning)
+    {
+        DWORD now =
+            GetTickCount();
+
+        if (
+            now - gLastMaintenanceTick
+            >= kMaintenanceIntervalMS)
+        {
+            gLastMaintenanceTick =
+                now;
+
+            if (
+                gEnableBackgroundMode)
+            {
+                SetThreadPriority(
+                    GetCurrentThread(),
+                    THREAD_PRIORITY_ABOVE_NORMAL
+                );
+            }
+
+            if (
+                !gCaps.hasModernHeapManagement)
+            {
+                EnableLFH();
+            }
+
+            if (
+                !gCaps.hasModernFramePacing)
+            {
+                ApplyTimerResolution();
+            }
+        }
+
+        if (
+            WaitForSingleObject(
+                gStopEvent,
+                1000
+            ) == WAIT_OBJECT_0)
+        {
+            break;
+        }
+    }
+
+    return 0;
 }
 
 void ShutdownRuntime()
 {
-    if (gShutdownStarted.exchange(true))
+    if (
+        gShutdownStarted.exchange(
+            true
+        ))
     {
         return;
     }
 
-    gRunning = false;
+    gRunning =
+        false;
 
     if (gStopEvent)
     {
@@ -803,13 +829,11 @@ void ShutdownRuntime()
         );
     }
 
-    if (
-        gWorkerThread &&
-        gWorkerThread != INVALID_HANDLE_VALUE)
+    if (gWorkerThread)
     {
         WaitForSingleObject(
             gWorkerThread,
-            3000
+            5000
         );
 
         CloseHandle(
@@ -820,13 +844,11 @@ void ShutdownRuntime()
             nullptr;
     }
 
-    if (
-        gLoggerThread &&
-        gLoggerThread != INVALID_HANDLE_VALUE)
+    if (gLoggerThread)
     {
         WaitForSingleObject(
             gLoggerThread,
-            3000
+            5000
         );
 
         CloseHandle(
@@ -835,6 +857,56 @@ void ShutdownRuntime()
 
         gLoggerThread =
             nullptr;
+    }
+
+    {
+        std::deque<std::string> remaining;
+
+        {
+            std::lock_guard<std::mutex> lock(
+                gLogMutex
+            );
+
+            remaining.swap(
+                gLogBuffer
+            );
+        }
+
+        if (
+            gLogFile !=
+            INVALID_HANDLE_VALUE)
+        {
+            for (const auto& line : remaining)
+            {
+                DWORD written = 0;
+
+                WriteFile(
+                    gLogFile,
+                    line.c_str(),
+                    (DWORD)line.size(),
+                    &written,
+                    nullptr
+                );
+            }
+
+            FlushFileBuffers(
+                gLogFile
+            );
+        }
+    }
+
+    RestoreTimerResolution();
+
+    if (
+        gLogFile !=
+        INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(
+            gLogFile
+        );
+
+        gLogFile =
+            INVALID_HANDLE_VALUE;
     }
 
     if (gStopEvent)
@@ -856,172 +928,6 @@ void ShutdownRuntime()
         gLogEvent =
             nullptr;
     }
-
-    {
-        std::deque<std::string> remaining;
-        {
-            std::lock_guard<std::mutex> lock(gLogMutex);
-            remaining.swap(gLogBuffer);
-        }
-
-        if (gLogFile != INVALID_HANDLE_VALUE)
-        {
-            for (const auto& line : remaining)
-            {
-                DWORD written = 0;
-                WriteFile(gLogFile, line.c_str(), (DWORD)line.size(), &written, nullptr);
-            }
-            FlushFileBuffers(gLogFile);
-        }
-    }
-
-    RestoreTimerResolution();
-
-    if (gLogFile != INVALID_HANDLE_VALUE)
-    {
-        CloseHandle(
-            gLogFile
-        );
-
-        gLogFile =
-            INVALID_HANDLE_VALUE;
-    }
-}
-
-unsigned __stdcall MaintenanceThread(
-    void*)
-{
-    SetThreadPriority(
-        GetCurrentThread(),
-        THREAD_PRIORITY_ABOVE_NORMAL
-    );
-
-    OptimizeScheduler();
-
-    while (gRunning)
-    {
-        DWORD result =
-            WaitForSingleObject(
-                gStopEvent,
-                kMaintenanceIntervalMS
-            );
-
-        if (result != WAIT_TIMEOUT)
-            break;
-    }
-
-    return 0;
-}
-
-void StartThreads()
-{
-    gStopEvent =
-        CreateEventA(
-            nullptr,
-            TRUE,
-            FALSE,
-            nullptr
-        );
-
-    gRunning = true;
-
-    StartLogger();
-
-    gWorkerThread =
-        (HANDLE)_beginthreadex(
-            nullptr,
-            0,
-            MaintenanceThread,
-            nullptr,
-            0,
-            nullptr
-        );
-}
-
-void LogDetectedPlugins()
-{
-    if (gCaps.hasAveSithis)
-    {
-        Log(
-            "AveSithisEngineFixes detected"
-        );
-    }
-
-    if (gCaps.hasEngineBugFixes)
-    {
-        Log(
-            "EngineBugFixes detected"
-        );
-    }
-
-    if (gCaps.hasBlueEngineFixes)
-    {
-        Log(
-            "BA_EngineFixes detected"
-        );
-    }
-
-    if (gCaps.hasDisplayTweaks)
-    {
-        Log(
-            "Display Tweaks detected"
-        );
-    }
-
-    if (gCaps.hasDXVK)
-    {
-        Log(
-            "DXVK detected"
-        );
-    }
-
-    if (gCaps.hasMoreHeap)
-    {
-        Log(
-            "MoreHeap detected"
-        );
-    }
-}
-
-bool InitializeRuntime(
-    const OBSEInterface* obse)
-{
-    DetectPluginStack(obse);
-
-    ApplyAdaptivePolicies();
-
-    ApplyRendererCompatibilityPolicies();
-
-    EnableBackgroundResponsiveness();
-
-    StabilizeMemorySubsystem();
-
-    StartThreads();
-
-    Log(
-        "%s v%u",
-        MASTER_PLUGIN_NAME,
-        MASTER_PLUGIN_VERSION
-    );
-
-    Log(
-        "Runtime Mode: %s",
-        RuntimeModeToString()
-    );
-
-    LogDetectedPlugins();
-
-    EnableLFH();
-
-    ApplyTimerResolution();
-
-    ApplyPriorityBoost();
-
-    Log(
-        "Runtime initialized"
-    );
-
-    return true;
 }
 
 extern "C"
@@ -1032,13 +938,6 @@ extern "C"
             const OBSEInterface* obse,
             PluginInfo* info)
     {
-        OpenLog();
-
-        if (!obse || !info)
-        {
-            return false;
-        }
-
         info->infoVersion =
             PluginInfo::kInfoVersion;
 
@@ -1065,35 +964,64 @@ extern "C"
 
     __declspec(dllexport)
         bool OBSEPlugin_Load(
-            const OBSEInterface* obse)
+            OBSEInterface* obse)
     {
-        if (!obse)
+        OpenLog();
+
+        Log(
+            "Loading %s",
+            MASTER_PLUGIN_NAME
+        );
+
+        DetectPluginStack(
+            obse
+        );
+
+        gStopEvent =
+            CreateEventA(
+                nullptr,
+                TRUE,
+                FALSE,
+                nullptr
+            );
+
+        StartLogger();
+
+        gRunning =
+            true;
+
+        gWorkerThread =
+            (HANDLE)_beginthreadex(
+                nullptr,
+                0,
+                MaintenanceThread,
+                nullptr,
+                0,
+                nullptr
+            );
+
+        Log(
+            "Plugin loaded successfully"
+        );
+
+        return true;
+    }
+
+    BOOL APIENTRY DllMain(
+        HMODULE hModule,
+        DWORD reason,
+        LPVOID)
+    {
+        if (
+            reason ==
+            DLL_PROCESS_ATTACH)
         {
-            return false;
+            DisableThreadLibraryCalls(
+                hModule
+            );
         }
 
-        return InitializeRuntime(obse);
+        return TRUE;
     }
 
-}
-
-BOOL APIENTRY DllMain(
-    HMODULE hModule,
-    DWORD reason,
-    LPVOID)
-{
-    if (reason == DLL_PROCESS_ATTACH)
-    {
-        DisableThreadLibraryCalls(
-            hModule
-        );
-    }
-    else if (
-        reason ==
-        DLL_PROCESS_DETACH)
-    {
-        ShutdownRuntime();
-    }
-
-    return TRUE;
 }
