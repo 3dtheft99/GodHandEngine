@@ -13,6 +13,7 @@
 #include <mmsystem.h>
 #include <psapi.h>
 #include <process.h>
+#include <avrt.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -26,12 +27,21 @@
 
 #pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "psapi.lib")
+#pragma comment(lib, "avrt.lib")
 
 using UInt32 = uint32_t;
 
 struct CommandInfo;
 
 typedef UInt32 PluginHandle;
+
+
+typedef LONG NTSTATUS;
+typedef NTSTATUS(WINAPI* NtSetInformationProcess_t)(HANDLE, ULONG, PVOID, ULONG);
+#define ProcessIoPriority 33
+#define IoPriorityNormal 2
+
+
 
 typedef LONG(WINAPI* NtSetTimerResolutionFn)(
     ULONG,
@@ -114,7 +124,7 @@ struct RuntimeCapabilities
 {
     bool hasAveSithis = false;
     bool hasEngineBugFixes = false;
-    bool hasBlueEngineFixes = false;
+    bool hasBAEngineFixes = false;
     bool hasDisplayTweaks = false;
 
     bool hasDXVK = false;
@@ -179,6 +189,9 @@ static UINT gWinMMPeriod =
 0;
 
 static HANDLE gMaintenanceTimer =
+nullptr;
+
+static HANDLE gMMCSSTask =
 nullptr;
 
 static bool gEnableDynamicSleepGranularity =
@@ -616,6 +629,21 @@ void OptimizeScheduler()
         );
     }
 
+    NtSetInformationProcess_t NtSetInformationProcess =
+        (NtSetInformationProcess_t)GetProcAddress(
+            GetModuleHandleA("ntdll.dll"),
+            "NtSetInformationProcess");
+
+    if (NtSetInformationProcess)
+    {
+        ULONG ioPriority = IoPriorityNormal;
+        NtSetInformationProcess(
+            process,
+            ProcessIoPriority,
+            &ioPriority,
+            sizeof(ioPriority));
+    }
+
     Log(
         "Scheduler optimized"
     );
@@ -664,14 +692,14 @@ void DetectPluginStack(
             "EngineBugFixes"
         );
 
-    gCaps.hasBlueEngineFixes =
+    gCaps.hasBAEngineFixes =
         obse->GetPluginLoaded(
-            "BlueEngineFixes"
+            "BA_EngineFixes"
         );
 
-    gCaps.hasDisplayTweaks =       
-            obse->GetPluginLoaded(
-                "oblivion_display_tweaks"
+    gCaps.hasDisplayTweaks =
+        obse->GetPluginLoaded(
+            "oblivion_display_tweaks"
         );
 
     gCaps.hasDXVK =
@@ -680,7 +708,7 @@ void DetectPluginStack(
             IsModuleLoaded("d3d11.dll") ||
             IsModuleLoaded("dxvk.dll") ||
             IsModuleLoaded("d3d9_dxvk.dll") ||
-            IsModuleLoaded("d3d11_dxvk.dll")       
+            IsModuleLoaded("d3d11_dxvk.dll")
             );
 
     gCaps.hasMoreHeap =
@@ -712,7 +740,7 @@ void DetectPluginStack(
         (
             gCaps.hasAveSithis ||
             gCaps.hasEngineBugFixes ||
-            gCaps.hasBlueEngineFixes
+            gCaps.hasBAEngineFixes
             );
 
     gCaps.hasModernHeapManagement =
@@ -757,6 +785,20 @@ unsigned __stdcall MaintenanceThread(
     void*)
 {
     OptimizeScheduler();
+
+    DWORD taskIndex = 0;
+
+    gMMCSSTask =
+        AvSetMmThreadCharacteristicsA(
+            "Games",
+            &taskIndex);
+
+    if (gMMCSSTask)
+    {
+        AvSetMmThreadPriority(
+            gMMCSSTask,
+            AVRT_PRIORITY_NORMAL);
+    }
 
     Sleep(3000);
 
@@ -893,6 +935,14 @@ void ShutdownRuntime()
                 gLogFile
             );
         }
+    }
+
+    if (gMMCSSTask)
+    {
+        AvRevertMmThreadCharacteristics(
+            gMMCSSTask);
+
+        gMMCSSTask = nullptr;
     }
 
     RestoreTimerResolution();
