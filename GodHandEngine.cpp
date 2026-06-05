@@ -13,7 +13,6 @@
 #include <mmsystem.h>
 #include <psapi.h>
 #include <process.h>
-#include <avrt.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -27,7 +26,6 @@
 
 #pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "psapi.lib")
-#pragma comment(lib, "avrt.lib")
 
 using UInt32 = uint32_t;
 
@@ -187,12 +185,6 @@ static ULONG gAppliedTimerResolution =
 
 static UINT gWinMMPeriod =
 0;
-
-static HANDLE gMaintenanceTimer =
-nullptr;
-
-static HANDLE gMMCSSTask =
-nullptr;
 
 static bool gEnableDynamicSleepGranularity =
 true;
@@ -416,20 +408,27 @@ unsigned __stdcall LoggerThread(
             FILE_END
         );
 
+        std::string batch;
+
+        batch.reserve(localCopy.size() * 128);
+
         for (const auto& line : localCopy)
+        {
+            batch += line;
+        }
+
+        if (!batch.empty())
         {
             DWORD written = 0;
 
             WriteFile(
                 gLogFile,
-                line.c_str(),
-                (DWORD)line.size(),
+                batch.data(),
+                (DWORD)batch.size(),
                 &written,
                 nullptr
             );
         }
-
-        FlushFileBuffers(gLogFile);
     }
 
     return 0;
@@ -786,20 +785,6 @@ unsigned __stdcall MaintenanceThread(
 {
     OptimizeScheduler();
 
-    DWORD taskIndex = 0;
-
-    gMMCSSTask =
-        AvSetMmThreadCharacteristicsA(
-            "Games",
-            &taskIndex);
-
-    if (gMMCSSTask)
-    {
-        AvSetMmThreadPriority(
-            gMMCSSTask,
-            AVRT_PRIORITY_NORMAL);
-    }
-
     Sleep(3000);
 
     DetectLateRuntimeModules();
@@ -819,10 +804,7 @@ unsigned __stdcall MaintenanceThread(
             if (
                 gEnableBackgroundMode)
             {
-                SetThreadPriority(
-                    GetCurrentThread(),
-                    THREAD_PRIORITY_ABOVE_NORMAL
-                );
+
             }
 
             if (
@@ -935,14 +917,6 @@ void ShutdownRuntime()
                 gLogFile
             );
         }
-    }
-
-    if (gMMCSSTask)
-    {
-        AvRevertMmThreadCharacteristics(
-            gMMCSSTask);
-
-        gMMCSSTask = nullptr;
     }
 
     RestoreTimerResolution();
